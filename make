@@ -1,90 +1,84 @@
-node('pioneer-1-admin') {
-    stage('Clean Workspace') {
-        cleanWs()
-    }
-    stage('Installing Dependencies') {
-        sh '''#!/bin/bash
-            set -x
-            export DEBIAN_FRONTEND=noninteractive
-            sudo apt-get update
-            sudo apt-get install -y autoconf autopoint wget git texinfo
-        '''
-    }
-    stage('Run system_info') {
-        sh '''#!/bin/bash
-            echo '============================================================='
-            echo '                       CPU INFO START                        '
-            echo '============================================================='
-            cat /proc/cpuinfo
-            echo '============================================================='
-            echo '                       CPU INFO END                          '
-            echo '============================================================='
+name: Build GNU Make
 
-            echo '============================================================='
-            echo '                       Kernel Info Start                        '
-            echo '============================================================='
-            uname -a
-            echo '============================================================='
-            echo '                       Kernel Info End                          '
-            echo '============================================================='
-            echo '============================================================='
-            echo '                       Glibc Version Start                        '
-            echo '============================================================='
-            ldd --version
-            echo '============================================================='
-            echo '                       Glibc Version End                          '
-            echo '============================================================='
-            echo '============================================================='
-            echo '                       OS Info Start                        '
-            echo '============================================================='
-            cat /etc/os-release
-            echo '============================================================='
-            echo '                       OS Info End                        '
-            echo '============================================================='
-        '''
-    }
-    stage('Setting Directories and clone') {
-        sh '''#!/bin/bash
-            mkdir installed_binaries
-            git clone --branch master --single-branch --depth=1 https://git.savannah.gnu.org/git/make.git
-        '''
-    }
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
 
-    stage('Run configure') {
-        sh '''#!/bin/bash -l
-            set -x
-            cd make
-            ./bootstrap
-            ./configure --prefix=$(readlink -f ../installed_binaries)
-        '''
-    }
-    stage('make and make check') {
-        sh '''#!/bin/bash -l
-            set -x
+jobs:
+  build:
+    runs-on: self-hosted
+    # If your runner has labels like: pioneer-1-admin
+    # use:
+    # runs-on: [self-hosted, pioneer-1-admin]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Clean Workspace
+        run: |
+          echo "Cleaning workspace..."
+          rm -rf *
+
+      - name: Install Dependencies
+        run: |
+          set -x
+          sudo apt-get update
+          sudo apt-get install -y autoconf autopoint wget git texinfo
+
+      - name: Run System Info
+        run: |
+          echo "================ CPU INFO ================"
+          cat /proc/cpuinfo
+          echo "================ KERNEL INFO ================"
+          uname -a
+          echo "================ GLIBC VERSION ================"
+          ldd --version
+          echo "================ OS INFO ================"
+          cat /etc/os-release
+
+      - name: Clone GNU Make
+        run: |
+          mkdir installed_binaries
+          git clone --branch master --single-branch --depth=1 https://git.savannah.gnu.org/git/make.git
+
+      - name: Bootstrap and Configure
+        run: |
+          set -x
           cd make
-          make -j32
-          # make check # Takes too much time so I am skipping this
+          ./bootstrap
+          ./configure --prefix=$(readlink -f ../installed_binaries)
+
+      - name: Build and Install
+        run: |
+          set -x
+          cd make
+          make -j$(nproc)
           make install
-        '''
-    }
-    stage('Check Version') {
-        sh '''#!/bin/bash -l
-            set -x
-            ./installed_binaries/bin/make --version
-        '''
-    }
-    stage('Compress Binaries and transfer to Cloud') {
-        sshagent(credentials: ['SSH_CLOUD_V_STORE_ID']){
-            sh '''#!/bin/bash -l
-            set -x
-                export FILENAME="make_$(date -u +"%H%M%S_%d%m%Y").tar.gz"
-                tar -cvf ./$FILENAME ./installed_binaries
-                eval $(keychain --eval --agents ssh ~/.ssh/cloud-store-key)
-                ssh cloud-store 'mkdir -p /var/www/nextcloud/data/admin/files/cloud-v-builds/make'
-                ssh cloud-store 'rm /var/www/nextcloud/data/admin/files/cloud-v-builds/make/*' # Removing older builds
-                scp $FILENAME cloud-store:/var/www/nextcloud/data/admin/files/cloud-v-builds/make/
-                ssh cloud-store 'sudo -u www-data php /var/www/nextcloud/occ files:scan --path="admin/files"'
-            '''
-        }
-    }
-}
+
+      - name: Check Version
+        run: |
+          set -x
+          ./installed_binaries/bin/make --version
+
+      - name: Compress Binaries
+        id: package
+        run: |
+          FILENAME="make_$(date -u +"%H%M%S_%d%m%Y").tar.gz"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+          tar -czvf $FILENAME installed_binaries
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_CLOUD_V_STORE_KEY }}
+
+      - name: Upload to Cloud Server
+        run: |
+          set -x
+          ssh -o StrictHostKeyChecking=no cloud-store 'mkdir -p /var/www/nextcloud/data/admin/files/cloud-v-builds/make'
+          ssh cloud-store 'rm -f /var/www/nextcloud/data/admin/files/cloud-v-builds/make/*'
+          scp $FILENAME cloud-store:/var/www/nextcloud/data/admin/files/cloud-v-builds/make/
+          ssh cloud-store 'sudo -u www-data php /var/www/nextcloud/occ files:scan --path="admin/files"'
