@@ -1,89 +1,109 @@
-node('pioneer-1-admin') {
-    stage('Clean Workspace') {
-        cleanWs()
-    }
-    stage('Installing Dependencies') {
-        sh '''#!/bin/bash
-            set -x
-            export DEBIAN_FRONTEND=noninteractive
-            sudo apt-get update
-            sudo apt-get install -y build-essential autoconf libfreetype6-dev gcc clang libfontconfig-dev libcups2-dev libx11-dev libxext-dev libxrender-dev libxrandr-dev libasound2-dev libffi-dev make autoconf libx11-dev libxext-dev libxrender-dev libxrandr-dev libxtst-dev libxt-dev
-        '''
-    }
-    stage('Run system_info') {
-        sh '''#!/bin/bash
-            echo '============================================================='
-            echo '                       CPU INFO START                        '
-            echo '============================================================='
-            cat /proc/cpuinfo
-            echo '============================================================='
-            echo '                       CPU INFO END                          '
-            echo '============================================================='
+name: Build OpenJDK (Template)
 
-            echo '============================================================='
-            echo '                       Kernel Info Start                        '
-            echo '============================================================='
-            uname -a
-            echo '============================================================='
-            echo '                       Kernel Info End                          '
-            echo '============================================================='
-            echo '============================================================='
-            echo '                       Glibc Version Start                        '
-            echo '============================================================='
-            ldd --version
-            echo '============================================================='
-            echo '                       Glibc Version End                          '
-            echo '============================================================='
-            echo '============================================================='
-            echo '                       OS Info Start                        '
-            echo '============================================================='
-            cat /etc/os-release
-            echo '============================================================='
-            echo '                       OS Info End                        '
-            echo '============================================================='
-        '''
-    }
-    stage('Setting Directories and clone') {
-        sh '''#!/bin/bash
-            set -x
-            git config https.postBuffer 1048576000
-            git config http.postBuffer 1048576000
-            git clone --branch master --single-branch --depth=1 https://github.com/openjdk/jdk.git
-        '''
-    }
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
-    stage('Run configure') {
-        sh '''#!/bin/bash -l
-            set -x
-            cd jdk
-            bash configure --prefix=$(readlink -f ../installed_binaries)
-        '''
-    }
-    stage('make') {
-        sh '''#!/bin/bash -l
-            set -x
+jobs:
+  build:
+    runs-on: self-hosted
+    # If your runner has labels:
+    # runs-on: [self-hosted, pioneer-1-admin]
+
+    steps:
+      - name: Clean Workspace
+        run: |
+          rm -rf *
+
+      - name: Install Dependencies
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential autoconf \
+            libfreetype6-dev gcc clang \
+            libfontconfig-dev libcups2-dev \
+            libx11-dev libxext-dev libxrender-dev \
+            libxrandr-dev libasound2-dev libffi-dev \
+            make autoconf libxtst-dev libxt-dev
+
+      - name: Run system_info
+        run: |
+          echo '============================================================='
+          echo '                       CPU INFO START                        '
+          echo '============================================================='
+          cat /proc/cpuinfo
+          echo '============================================================='
+          echo '                       CPU INFO END                          '
+          echo '============================================================='
+
+          echo '============================================================='
+          echo '                       Kernel Info Start                        '
+          echo '============================================================='
+          uname -a
+          echo '============================================================='
+          echo '                       Kernel Info End                          '
+          echo '============================================================='
+
+          echo '============================================================='
+          echo '                       Glibc Version Start                        '
+          echo '============================================================='
+          ldd --version
+          echo '============================================================='
+          echo '                       Glibc Version End                          '
+          echo '============================================================='
+
+          echo '============================================================='
+          echo '                       OS Info Start                        '
+          echo '============================================================='
+          cat /etc/os-release
+          echo '============================================================='
+          echo '                       OS Info End                        '
+          echo '============================================================='
+
+      - name: Clone OpenJDK
+        run: |
+          set -eux
+          git config --global https.postBuffer 1048576000
+          git config --global http.postBuffer 1048576000
+          git clone --branch master --single-branch --depth=1 https://github.com/openjdk/jdk.git
+
+      - name: Configure OpenJDK
+        run: |
+          set -eux
+          cd jdk
+          bash configure --prefix=$(readlink -f ../installed_binaries)
+
+      - name: Build OpenJDK
+        run: |
+          set -eux
           cd jdk
           make JOBS=32 images
-        '''
-    }
-    stage('Check Version') {
-        sh '''#!/bin/bash -l
-            set -x
-            ./jdk/build/linux-riscv64-server-release/jdk/bin/java --version
-        '''
-    }
-    stage('Compress Binaries and transfer to Cloud') {
-        sshagent(credentials: ['SSH_CLOUD_V_STORE_ID']){
-            sh '''#!/bin/bash -l
-            set -x
-                export FILENAME="openjdk_$(date -u +"%H%M%S_%d%m%Y").tar.gz"
-                tar -cvf ./$FILENAME ./jdk
-                eval $(keychain --eval --agents ssh ~/.ssh/cloud-store-key)
-                ssh cloud-store 'mkdir -p /var/www/nextcloud/data/admin/files/cloud-v-builds/openjdk'
-                ssh cloud-store 'rm /var/www/nextcloud/data/admin/files/cloud-v-builds/openjdk/*' # Removing older builds
-                scp $FILENAME cloud-store:/var/www/nextcloud/data/admin/files/cloud-v-builds/openjdk/
-                ssh cloud-store 'sudo -u www-data php /var/www/nextcloud/occ files:scan --path="admin/files"'
-            '''
-        }
-    }
-}
+
+      - name: Check Java Version
+        run: |
+          set -eux
+          ./jdk/build/linux-riscv64-server-release/jdk/bin/java --version
+
+      - name: Compress Binaries
+        run: |
+          set -eux
+          FILENAME="openjdk_$(date -u +"%H%M%S_%d%m%Y").tar.gz"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+          tar -cvf "$FILENAME" ./jdk
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_CLOUD_V_STORE_ID }}
+
+      - name: Upload to Cloud
+        run: |
+          set -eux
+          ssh cloud-store 'mkdir -p /var/www/nextcloud/data/admin/files/cloud-v-builds/openjdk'
+          ssh cloud-store 'rm /var/www/nextcloud/data/admin/files/cloud-v-builds/openjdk/*' || true
+          scp "$FILENAME" cloud-store:/var/www/nextcloud/data/admin/files/cloud-v-builds/openjdk/
+          ssh cloud-store 'sudo -u www-data php /var/www/nextcloud/occ files:scan --path="admin/files"'
