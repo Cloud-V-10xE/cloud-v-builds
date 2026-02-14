@@ -1,96 +1,102 @@
-node('pioneer-1-admin') {
-    stage('Clean Workspace') {
-        cleanWs()
-    }
-    stage('Installing Dependencies') {
-        sh '''#!/bin/bash
-            export DEBIAN_FRONTEND=noninteractive
-            sudo apt-get update
-            sudo apt-get install -y autoconf automake autopoint flex gperf graphviz help2man texinfo
-        '''
-    }
-    stage('Run system_info') {
-        sh '''#!/bin/bash
-            echo '============================================================='
-            echo '                       CPU INFO START                        '
-            echo '============================================================='
-            cat /proc/cpuinfo
-            echo '============================================================='
-            echo '                       CPU INFO END                          '
-            echo '============================================================='
+name: Build Bison (RISC-V)
 
-            echo '============================================================='
-            echo '                       Kernel Info Start                        '
-            echo '============================================================='
-            uname -a
-            echo '============================================================='
-            echo '                       Kernel Info End                          '
-            echo '============================================================='
-            echo '============================================================='
-            echo '                       Glibc Version Start                        '
-            echo '============================================================='
-            ldd --version
-            echo '============================================================='
-            echo '                       Glibc Version End                          '
-            echo '============================================================='
-            echo '============================================================='
-            echo '                       OS Info Start                        '
-            echo '============================================================='
-            cat /etc/os-release
-            echo '============================================================='
-            echo '                       OS Info End                        '
-            echo '============================================================='
-        '''
-    }
-    stage('Setting Directories and clone') {
-        sh '''#!/bin/bash
-            mkdir installed_binaries
-            git clone --branch master --single-branch --depth=1 https://github.com/akimd/bison.git
-        '''
-    }
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
-    stage('Run boostrap') {
-        sh '''#!/bin/bash -l
-            set -x
-            cd bison
-            git submodule update --init
-            ./bootstrap
-            ./autogen.sh
-        '''
-    }
-    stage('Run configure') {
-        sh '''#!/bin/bash -l
-            set -x
-            cd bison
-            ./configure --prefix=$(readlink -f ../installed_binaries)
-        '''
-    }
-    stage('make and make check') {
-        sh '''#!/bin/bash -l
-            set -x
-            cd bison
-            make -j32
-            make install
-        '''
-    }
-    stage('Check Version') {
-        sh '''#!/bin/bash -l
-            set -x
-            ./installed_binaries/bin/bison --version
-            ./installed_binaries/bin/yacc --version
-        '''
-    }
-    stage('Compress Binaries and transfer to Cloud') {
-        sshagent(credentials: ['SSH_CLOUD_V_STORE_ID']){
-            sh '''#!/bin/bash -l
-            set -x
-                export FILENAME="bison_$(date -u +"%H%M%S_%d%m%Y").tar.gz"
-                tar -cvf ./$FILENAME ./installed_binaries
-                eval $(keychain --eval --agents ssh ~/.ssh/cloud-store-key)
-                ssh cloud-store 'mkdir -p /var/www/nextcloud/data/admin/files/cloud-v-builds/bison'
-                scp $FILENAME cloud-store:/var/www/nextcloud/data/admin/files/cloud-v-builds/bison/
-                ssh cloud-store 'sudo -u www-data php /var/www/nextcloud/occ files:scan --path="admin/files"'
-            '''
-        }
-    }
-}
+jobs:
+  build:
+    runs-on: [self-hosted, pioneer-1-admin]
+
+    env:
+      INSTALL_DIR: installed_binaries
+
+    steps:
+      - name: Clean Workspace
+        run: |
+          rm -rf *
+      
+      - name: Install Dependencies
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake autopoint flex gperf \
+            graphviz help2man texinfo git make \
+            keychain openssh-client
+
+      - name: Run system_info
+        run: |
+          echo '============================================================='
+          echo 'CPU INFO'
+          cat /proc/cpuinfo
+          echo '============================================================='
+
+          echo 'KERNEL INFO'
+          uname -a
+          echo '============================================================='
+
+          echo 'GLIBC VERSION'
+          ldd --version
+          echo '============================================================='
+
+          echo 'OS INFO'
+          cat /etc/os-release
+          echo '============================================================='
+
+      - name: Clone Bison
+        run: |
+          set -eux
+          mkdir -p $INSTALL_DIR
+          git clone --branch master --single-branch --depth=1 https://github.com/akimd/bison.git
+
+      - name: Bootstrap
+        run: |
+          set -eux
+          cd bison
+          git submodule update --init
+          ./bootstrap
+          ./autogen.sh
+
+      - name: Configure
+        run: |
+          set -eux
+          cd bison
+          ./configure --prefix=$(readlink -f ../$INSTALL_DIR)
+
+      - name: Build and Install
+        run: |
+          set -eux
+          cd bison
+          make -j$(nproc)
+          make install
+
+      - name: Check Version
+        run: |
+          set -eux
+          ./$INSTALL_DIR/bin/bison --version
+          ./$INSTALL_DIR/bin/yacc --version
+
+      - name: Compress Binaries
+        run: |
+          set -eux
+          FILENAME="bison_$(date -u +"%H%M%S_%d%m%Y").tar.gz"
+          tar -czvf "$FILENAME" "$INSTALL_DIR"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_CLOUD_V_STORE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan cloud-store >> ~/.ssh/known_hosts
+
+      - name: Upload to Cloud
+        run: |
+          set -eux
+          ssh cloud-store 'mkdir -p /var/www/nextcloud/data/admin/files/cloud-v-builds/bison'
+          scp "$FILENAME" cloud-store:/var/www/nextcloud/data/admin/files/cloud-v-builds/bison/
+          ssh cloud-store 'sudo -u www-data php /var/www/nextcloud/occ files:scan --path="admin/files"'
